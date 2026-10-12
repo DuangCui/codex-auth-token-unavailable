@@ -88,6 +88,53 @@ python -c "import json;d=json.load(open(r'%USERPROFILE%\.codex\auth.json'));prin
 - 不要把 `auth.json` 的内容复制到任何地方,里面有可用的 access token 与 refresh token。
 - 不要在开启本地路由接管时切到官方供应商,通过代理访问官方接口存在账号风险。
 
+## 2026-10-12 续一:重启后掉登录(token 自然到期)
+
+### 症状
+
+- 重启电脑后 Codex Desktop 停在登录页,不再自动进入;
+- 中转与 CC Switch 一切正常:当天用量日志仍在增长,本地路由 `127.0.0.1:15721` 正常监听,`config.toml` 未被改动。
+
+### 根因
+
+官方登录 token 有自然寿命(约 30 天),平时由应用自动续期。本次 `auth.json` 的 `last_refresh` 停在 2026-09-10(即上次事故后重新登录的时间),到 2026-10-12 已 32 天,token 过期且续期未成功。应用常驻运行时不会主动重验,重启迫使它做一次校验,于是退回登录页——重启只是恰好撞上到期,不是它弄坏的。
+
+### 排查要点
+
+`auth.json` 存在、四件套齐全时,只看一个字段就能定位:
+
+```bash
+python -c "import json;d=json.load(open(r'%USERPROFILE%\.codex\auth.json'));print(d['last_refresh'])"
+```
+
+距今超过 30 天即为到期。同时确认 15721 在监听(`netstat -ano | findstr 15721`)、`~/.cc-switch/settings.json` 的 `preserveCodexOfficialAuthOnSwitch` 仍为 `true`、历史库 `thread_history_1.sqlite` 完好。
+
+### 修复
+
+登录页点"继续登录",用同一个 OpenAI 账号登录一次,`last_refresh` 刷新为当天即成功。历史记录不受影响——会话存于本地 `sessions/` 与 `thread_history_1.sqlite`,登录只换 token,不碰数据。
+
+## 2026-10-12 续二:重新登录后,模型选择器里没有 API 模型
+
+### 症状
+
+登录成功后,模型选择器只剩官方模型(gpt-6-astra 一类),第三方供应商的模型全部消失;`config.toml` 的 `model` 被重置为官方默认,并新增了 `model_reasoning_effort = "ultra"`。
+
+### 根因
+
+登录动作会从官方账号同步一份官方模型目录,并把默认模型重置为官方款;同时 CC Switch 侧的"模型目录接管"被摘除——`~/.cc-switch/codex-client-ack.json` 的 `catalog` 字段变为 `"none"`,`codex-catalog-history.json` 里指纹在 `none` 与哈希之间翻转。目录未注入时,Codex 回落到官方模型列表。本地路由、provider、登录态本身都完好,缺的只是目录接管这一层。
+
+### 修复
+
+1. CC Switch → Codex → 重新点击一次要用的供应商卡片(重新应用):它会重写 `config.toml`(恢复该供应商的默认模型)并重新注入模型目录(`model_catalog_json = "cc-switch-model-catalog.json"` + `~/.codex/cc-switch-model-catalog.json`);
+2. 完全退出 Codex 再启动(托盘右键退出,不是关窗口)——`config.toml` 与模型目录都在启动时读取;
+3. 配了多个供应商时,注意点真正要用的那张卡片:每家注入的模型目录不同(例如 DeepSeek 直连供应商注入 deepseek-v4-*,中转供应商注入自己的模型列表)。
+
+`preserveCodexOfficialAuthOnSwitch = true` 会保住刚登录好的官方 token,此步不会把它覆盖。
+
+### 周期性提醒
+
+官方 token 约 30 天到期属正常现象。完整恢复链:登录一次 → CC Switch 重切供应商 → 完全重启 Codex,三步即可。重新登录后不要直接用官方默认模型跑——此时默认模型是官方目录里的名字,中转不一定认。
+
 ## 参考
 
 - openai/codex issue #21118: Browser Use actions fail with "Codex auth token is unavailable" in API-key mode
